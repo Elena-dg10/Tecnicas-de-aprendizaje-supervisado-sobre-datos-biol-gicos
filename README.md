@@ -6,9 +6,14 @@ El conjunto de datos se conforma por dos documentos: **data.csv** que contiene l
 2. Estadísticas descriptivas, validación cruzada, regularización/estandarización de variables redundantes: modelo ElasticNet y Ridge.
 3. División del conjunto de datos para testing y training.
 4. Entrenamiento de datos con **modelos**:
+   
    1️⃣ RANDOM FOREST
+   
    2️⃣ DECISION TREES
+   
    3️⃣ SUPPORT VECTOR MACHINE (SVM)
+   
    4️⃣ MODELO KNN
-5. Comparativa de los modelos mediante curvas ROC.
+   
+6. Comparativa de los modelos mediante curvas ROC.
    
