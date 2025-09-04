@@ -1,0 +1,497 @@
+---
+title: "Actividad_2_EDG_MD"
+output: html_document
+date: "2025-05-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,         # Muestra tu código
+  results = 'hide',    # Oculta todos los resultados (como summary, table, etc.)
+  message = FALSE,     # Oculta mensajes (como los de library())
+  warning = FALSE      # Oculta advertencias
+)
+```
+
+# Preparación del entorno de trabajo
+
+Cargamos todas las librerías y paqetes necesarios para la práctica.
+
+```{r librerias, echo=TRUE}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(glmnet)
+})
+
+options(repos = c(CRAN = "https://cran.rstudio.com"))
+if (!require("glmnet")) install.packages("glmnet")
+library("dplyr")
+#install.packages("glmnet") # Modelos lineales de regularización (Ridge, Lasso, ElasticNet...)
+library("glmnet")
+#install.packages("caret") # Modelos de ML, partición de datos...
+library("caret")
+#install.packages("rattle")
+library("rattle")
+#install.packages("randomForest") # Necesaria para randomForest
+library("randomForest") 
+#install.packages("pROC")
+library("pROC")
+library("ggplot2")
+#install.packages("ROCR")
+library("ROCR")
+```
+
+## Importación y tratamiento de los datos
+
+```{r}
+df_data <- read.csv("/Users/emmettdiez/Desktop/data.csv")
+```
+
+Comprobamos si tenemos valores NA:
+
+```{r}
+anyNA (df_data) # No existen valores NA
+#Sumamos los valores NA por columnas.
+Na_columnas <- colSums((is.na(df_data))) # Todas son ceros porque no existen.
+```
+
+Comprobamos si tenemos valores igual a cero:
+
+```{r}
+any(df_data == 0) # Tenemos valores iguales a cero. # Sumamos los valores cero por columnas. 
+Ceros_columnas <- colSums(df_data == 0) # No hay columnas que sean enteramente ceros.
+all(df_data$concavity3 == 0)
+all(df_data$concave_points3 == 0)
+```
+
+Vemos la esturctura que tienen nuestros datos con las funciones str() y glimpse() : quitando la segunda columna que es categórica, el resto son numéricas.
+
+```{r}
+str(df_data) 
+glimpse(df_data)
+```
+
+Vemos si todas nuestras variables tienen variabilidad:
+
+```{r}
+sapply(df_data, function(x) 
+length(unique(x))) # Todas tienen variabilidad ya que ninguna nos da un valor de 1.
+```
+
+Preparamos el dataframe con valores únicamente numéricos para poder escalarlo y normalizar los datos.
+
+Escalamos los datos y normalizamos. La función **scale**() sirve para ambas cosas ya que integra **z-score** (media 0, desviación testándar 1). Luego, lo convertimos de nuevo en dataframe ya que la función **scale**() devuelve un objeto matriz. Con **cbind**() devolvemos la columna de la variable predictora "diagnosis".
+
+```{r}
+df_numerico <- df_data[sapply(df_data, is.numeric)]
+df_escalado <- scale(df_numerico)
+df_escalado <- as.data.frame(df_escalado) 
+df_final <- cbind(df_escalado, Diagnosis = df_data$Diagnosis)
+```
+
+# ESTADÍSTICAS DESCRIPTIVAS PREVIAS AL ANÁLISIS
+
+```{r}
+summary(df_final)
+```
+
+Veremos si hay multicolinealidad antes de elegir un método de reducción de dimensiones. Lo hacemos con la matriz de correlación:
+
+```{r}
+matriz_corr <- cor(df_escalado) 
+# Visualizamos con heatmap: 
+heatmap(matriz_corr)
+# Usamos también eigenvalues para comprobarlo con más de dos variables a la vez:
+eigen_values <- eigen(matriz_corr)$values
+condition_number <- sqrt(max(eigen_values)/ min(eigen_values))
+condition_number
+# En este caso el condition number es de 316,038 por lo que al ser mayor de 30 indica una alta multicolinealidad. 
+```
+
+En vista de que hay bastante colinealidad entre varias de mis variables, voy a utilizar un modelo lineal de regularización de tipo ElasticNet para reducirla y eliminar posibles variables redundantes.
+
+```{r}
+set.seed(1234)
+x <- as.matrix(df_escalado) 
+y <- as.factor(df_data$Diagnosis)
+```
+
+Pruebo varios alphas para ajustarlo lo mejor posible, siempre entre 0 y 1 que son los valores que trabaja ElnasticNet.
+
+#Usamos bionmial como family porque nuestra variable predictoria "diagnosis" lo es, siendo posibles las clases "maligno" y "benigno".
+
+```{r}
+alphas <- seq(0, 1, by = 0.1) 
+alpha_results <- data.frame(alpha = numeric(), lambda = numeric(), cvm = numeric())
+
+for (a in alphas) {
+  cross_val_model <- cv.glmnet(x, y, alpha = a, family = "binomial")
+  best_lambda <- cross_val_model$lambda.min
+  min_cvm <- min(cross_val_model$cvm)
+  alpha_results <- rbind(alpha_results, data.frame(alpha = a, lambda = best_lambda, cvm = min_cvm))
+}
+```
+
+Obtenemos el mejor alpha según el menor error de validación cruzada (minimo cvm):
+
+```{r}
+best_alpha <- alpha_results[which.min(alpha_results$cvm), "alpha"]
+print(alpha_results)
+cat("Mejor alpha:", best_alpha, "\n")
+```
+
+Puesto que nos sale un alpha de cero, esto quiere decir que la validación cruzada ha determinado que es mejor la regresión de Ridge donde no se eliminan variables.
+
+Esto es así porque de nuestras más de 300 variables, todas parecen ser importantes.
+
+Aplicamos entonces el modelo RIDGE con alpha = 0 y el mínimo lambda. Hacemos una prueba o entrenamiento con cross validation de los posibles lambdas para ver cuál es el mejor, y lo usaremos en el modelo final.
+
+```{r}
+set.seed(1234)
+# Hacemos una prueba o entrenamiento con cross validation de los posibles lambdas para ver cuál es el mejor, y lo usaremos en el modelo final.
+cross_val_ridge <- cv.glmnet(x, y, alpha = 0, family = "binomial") # alpha = 0 -> ridge
+#Modelo final con el mejor lambda obtenido en el entrenamiento previo.
+modelo_ridge <- glmnet(x, y, alpha = 0, lambda = cross_val_ridge$lambda.min, family = "binomial")
+coef(modelo_ridge)
+```
+
+En el resultado vemos que hay relaciones positivas y negativas. Cuanto mayor es el valor, más impacto tiene en la predicción. Por ejemplo, texture3=0,454 influye más que smoothness2 = 0,018.
+
+Podemos hacer un plot donde vemos la progresión de los lalmbda:
+
+```{r}
+plot(cross_val_ridge)
+```
+
+# DIVISIÓN DEL CONJUNTO DE DATOS PARA TESTING/TRAINING
+
+Dividimos el conjunto de datos en conjuntos de entrenamiento y prueba:
+
+```{r}
+set.seed(1234)
+```
+
+#Convertimos la variable respuesta a factor para poder predecir.
+
+```{r}
+df_data$Diagnosis <- as.factor(df_data$Diagnosis)
+```
+
+Creamos los indices de entrenamiento (80%). Usamos la función de la librería Caret "Create Data Partition".
+
+```{r}
+trainIndex <- createDataPartition(df_final$Diagnosis, p=0.8, list = FALSE)
+trainData <- df_final[trainIndex,]
+testData <- df_final[-trainIndex,]
+trainData$Diagnosis <- as.factor(trainData$Diagnosis) # Convertimos a factor la cariable diagnosis para poder utilizarla en los modelos.
+```
+
+# SELECCIÓN Y ENTRENAMIENTO DEL MODELO
+
+Al igual que hemos usado family = "bionomial" en glmnet() porque mi variable de estudio es categórica, a la hora de seleciconar los modelos nos quedaremos con los de clasificación porque aceptan variables categóricas.
+
+1.  RANDOM FOREST 
+
+El primer odelo que vamos a probar es RANDOM FOREST porque:
+
+-   Su objetivo es combinar un gran número de árboles de decisión en un gran bosque mediante el bagging (se basa en el concepto de Bootstrapping, el cual consiste en obtener subconjuntos de datos con remplazamiento y entrenar cada algoritmo débil con uno de estos subconjunto).
+
+-   No necesita escalado (aunque ya lo tenemos hecho).
+
+-   Es bueno con muchas variables correlacionadas (como es nuestro caso).
+
+-   Permite ver la importancia de las variables (como ocurre al hacer un PCA).
+
+Entrenamos el modelo usando la función **randomForest**() del paquete **randomForest**. Especificamos un número de árboles de 100 (**ntree=100**):
+
+-   ""Diagnosis \~ ." permite usar todas las variables como predictores.
+
+```{r}
+RF_Model <- randomForest::randomForest(Diagnosis ~ ., data = trainData, ntree = 100) # He tenido que llamar así a la librería de random forest ya que estaba siendo enmascarada por rattle.
+print(RF_Model) # Vemos el resultado del modelo. 
+plot(RF_Model) 
+confusionMatrix(RF_Model$predicted, trainData$Diagnosis)
+```
+
+En los resultados vemos que hemos creado un bosque con 100 árboles de decisión (clasificación). En cada árbol se prueban 5 variables aleatorias.
+
+El **OOB** es una estimación del error del modelo en el entrenamiento. Se calcula con las muestras que quedaron fuera del árbol. El valor es de 3.51% que es muy bajo, lo cual indica que el modelo está prediciendo bien.
+
+En cuanto a la **matriz de confusión** vemos que se clasificaron correctamente 279 benignos frente a 161 malignos. El modelo se equivocó en 7 casos benignos clasificados como malignos (falsos positivos), y se volvió a equivocar en 9 casos malignos clasificados como benignos (falsos negativos).
+
+La **Accuracy** o exactitud es del 96,5% que es muy buena, el modelo acierta casi todos los casos. EL **IC** (intervalo de confianza) es del 95% por lo que tenemos alta certeza de que es así y no se equivoca ni es casualidad. En el **PLOT** se observan los errores cometidos para cada árbol de decisión.
+
+El parámetro **Kappa** mide el acierto del modelo entre lo predicho y lo real, en comparación con lo que podría haber sido ajustado por el azar. Un valor entre 0.8-1 es muy bueno. Esto quiere decir que hay concordancia entre lo predicho y lo real. Tenemos buenas tasas de **sensibilidad** (detección acertada de positivos o benignos) y **especificidad** (detección buena de malignos o negativos): siendo 97% y 94% respectivamente. Por último la **clase positiva** nos sale la B (benigno) lo cual es concordante con la realidad.
+
+A continuación, obtenemos las **predicciones** y **probabilidades** de las clases, y guardamos los datos de confusionMatrix para futuras comparaciones. Usamos los datos de **testing** ya que son los que el modelo no conoce hasta el momento y vamos a ver qué tan bien consigue clasificar.
+
+```{r}
+predictions_RF <- predict(RF_Model, newdata = testData) #Metemos en el modelo RF los datos de testing. 
+predictions_RF # Vemos las predicciones
+```
+
+Antes de hacer la matriz de confusion volvemos a convertir a factor las variables "predictions_RF" y "diagnosis", ya que al dividir los conjuntos de training y testing muchas veces se deshace (como ha ocurrido ahora):
+
+```{r}
+testData$Diagnosis <- factor(testData$Diagnosis, levels = c("B", "M")) 
+predictions_RF <- factor(predictions_RF, levels = c("B", "M"))
+```
+
+Usamos de nuevo la matriz de confusión para evaluar la precisión del modelo:
+
+```{r}
+confusionMatrix(predictions_RF, testData$Diagnosis)
+```
+
+De nuevo vemos que la **matriz de confusión** es bastante buena y tenemos un accuracy muy buena del 94% y un **CI** del 95%.
+
+**Kappa** vuelve a estar por encima de 0,8 sinedo 0,88 y la **sensitividad** y **especificidad** del 95% y 92% respectivamente. De nuevo, la **clase positiva** clasificada es la B de Benigno. En cuanto a la **matriz de confusión**, 68 casos positivos reales fueron clasificados como tal, cometiendo error solo con tres de ellos. Para el caso de los malignos 39 fueron clasificados correctamente, con un error de tres casos clasificados benignos siendo malignos.
+
+Estos valores nos demuestran que realmente el modelo está entendiendo y clasificando bien nuestros datos, sin apenas error.
+
+Podemos obtener cuántos tipos hay de cada clase y ver las **probabilidades** usando la función "**typepro()**":
+
+```{r}
+table(testData$Diagnosis) # Clase positiva B, benigno.
+probabilidades_RF <- predict(RF_Model, newdata = testData, type = "prob") 
+probabilidades_RF # Estas las usaremos más adelante para las curvas ROC
+```
+
+2.  DECISION TREES
+
+He elegido este modelo para el análisis porque es fácilmente interpretable, captura relaciones **no lineales** y es fácil de visualizar. Hay que tener cuidado, según he leído, con el **sobreajuste**. Usamos la función **train**() del paquete "**caret**" y la función **rpart** para indicar que es un árbol de decisión y a su vez, clasificación.
+
+En el parámetro **preProcess** no pongo "center" ni "scale" puesto que mis datos ya están escalados previamente y centrados a media cero.
+
+```{r}
+DT_Model <- train(Diagnosis ~ ., 
+                  data = trainData,
+                  method = "rpart",
+                  trControl = trainControl(method = "cv", number = 10),
+                  tuneLength = 10)
+DT_Model
+plot(DT_Model)
+fancyRpartPlot(DT_Model$finalModel, type = 2)
+```
+
+Creamos el árbol de decisión y lo entrenamos usando trainControl conunas particiones o repeticiones de 10 veces. Probamos 10 valores diferentes de complexity parameter (evita sobreajuste). Se eligió el **cp** = 0 porque dio la mayor precisión (**accuracy** = 91.89%).
+
+Por otro lado **kappa** o acierto entre predicciones y realidad, no es malo ya que tenemos valores de 0,8.
+
+```{r}
+predictions_DT <- predict(DT_Model, newdata = trainData) #Metemos en el modelo DT los datos de testing. 
+predictions_DT # Vemos las predicciones
+```
+
+Antes de hacer la matriz de confusion volvemos a convertir a factor la variable predictions y diagnosis ya que al dividir los conjuntos de training y testing muchas veces se deshace (como ha ocurrido anteriormente):
+
+```{r}
+trainData$Diagnosis <- factor(trainData$Diagnosis, levels = c("B", "M")) 
+predictions_DT <- factor(predictions_DT, levels = c("B", "M"))
+```
+
+Usamos de nuevo la **matriz de confusión** para evaluar la precisión del modelo:
+
+```{r}
+confusionMatrix(predictions_DT, trainData$Diagnosis) 
+```
+
+Vemos una matriz de confusión bastante buena donde predice 278 benignos bien, respecto a 7 mal, y 163 malignos bien con respecto a 8 mal. El **accuracy** es muy bueno, del 96% por lo que confirma que el modelo acierta casi todos los casos. EL **CI** es del 95% por lo que tenemos certeza de que no fue por azar. El parámetro **kappa** es de 0,92 por lo que es un valor muy bueno, muy cercano al máximo (1). De nuevo la **sensitividad** y **especificidad** son valores de más del 90%, por lo que son excelentes. La **clase positiva** B "Benigno" ha sido clasificada correctamente como tal.
+
+Ahora vamos a probar al modelo con los datos de **testing**:
+
+```{r}
+predictions_DTtest <- predict(DT_Model, newdata = testData) #Metemos en el modelo DT los datos de testing. 
+predictions_DTtest # Vemos las predicciones
+```
+
+Usamos de nuevo la **matriz de confusión** para evaluar la precisión del modelo:
+
+```{r}
+confusionMatrix(predictions_DTtest, testData$Diagnosis)
+```
+
+La matriz de confusión es bastante buena y tenemos un **accuracy** muy alta, del 91%, y un **CI** del 95%. **Kappa** vuelve a ser 0,80 y la **sensitividad** y **especificidad** del 95% y 92% respectivamente. Son valores muy buenos. De nuevo la **clase positiva** clasificada es la B de Benigno. En cuanto a la **matriz de confusión** 68 casos positivos reales fueron clasificados como tal, cometiendo error en siete de ellos. Para el caso de los malignos 35 fueron clasificados correctamente, con un error de tres casos clasificados benignos siendo malignos. Estos valores nos demuestran que realmente el modelo está entendiendo y clasificando bien nuestros datos, sin apenas error.
+
+Por último, obtenemos cuántos tipos hay de cada clase y vemos las **probabilidades**.
+
+```{r}
+table(testData$Diagnosis)
+probabilidades_DT <- predict(RF_Model, newdata = testData, type = "prob")
+probabilidades_DT # Estas las usaremos más adelante para las curvas ROC
+```
+
+3.  SUPPORT VECTOR MACHINE (SVM)
+
+Elijo el modelo SVM de la librería **caret** ya que es preciso con problemas complejos y grandes dimensiones. En cambio perderé en el ajuste así como en su interpretabilidad. Hacemos un **modelo lineal** ya que las clases Maligno y Benigno son fácilmente separables y así restamos complejidad al análisis y posibilidad de cometer otros errores o sobreajustar.
+
+En este modelo que depende de la distancia entre puntos sí que necesito escalar y centrar los datos (como nu fue el caso en el anterior). Si las variables están en escalas muy diferentes, puede sesgar las distancias y afectar el rendimiento.
+
+Probé con number = 5 en trainControl pero había mcha variación, por lo que investigué un number de 10 suele ser el óptimo y más ajustado. Suelen ponerse menos pruebas de cross validation cuando no tienes recursos computacionales o tiempo para ejecutar las 10. En cuanto a C, que es el parámetro de penalización del error, estoy eligiendo una gran precisión porque particiono valores entre 0 y 2 en 20 veces. En este caso, he puesto que parta no desde 0 sino de 0.0001 porque si lo hacía desde cero, el primer valor de Accuracy y Kappa era NaN. Por tanto, he probado varios valores distintos de cero, y el que más se parecía en resultados a 0 (pero evitando los NaN) era 0.0001.
+
+```{r}
+SVM_Model <- train(Diagnosis ~ ., data = trainData, method = "svmLinear", trControl = trainControl(method = "cv", number = 10), preProcess = c("center", "scale"), tuneGrid = expand.grid(C = seq(0.0001, 2, length = 20)), prob.model = TRUE)
+
+SVM_Model
+plot(SVM_Model)
+```
+
+El **valor C** nos sale de 0,84 de las 20 particiones que hizo. La **accuracy** más alta ha sido de 98% y el **kappa** de 95%. Todos estos valores son bastante buenos, pero ahora veremos si el modelo es realmente capaz con los datos de testing.
+
+```{r}
+predictions_SVM <- predict(SVM_Model, newdata = trainData) #Metemos en el modelo SVM los datos de testing. 
+predictions_SVM # Vemos las predicciones
+
+#De nuevo nos aseguramos de que los datos estén como factores para poder hacer la matriz. 
+predictions_SVM <- factor(predictions_SVM, levels = c("B", "M")) 
+trainData$Diagnosis <- factor(trainData$Diagnosis, levels = c("B", "M"))
+
+confusionMatrix(predictions_SVM, trainData$Diagnosis)
+```
+
+Vemos en la **matriz de confusión** que 286 casos fueron correctamente clasificados como benignos, versus los 6 errores clasificados como malignos. Por el otro lado, los 164 casos de maligno fueron correctamente clasificados, sin error.
+
+La **accuracy** (exactitud) ha subido con respecto a otros modelos sieindo del 98%. El **CI** del 95% nos da fiabilidad en las predicciones, no tratándose estas del azar. **Kappa** es más alto también que en otros modelos, con un 0,97 (97%), así como la **sensitividad** y **especificidad** del 100% y 96% respectivamente). De nuevo, la **clase positiva** es la B de Benigno, clasificada correctamente.
+
+Ahora vamos a meter los datos de testing para probar el modelo:
+
+```{r}
+predictions_SVMtest <- predict(SVM_Model, newdata = testData) #Metemos en el modelo DT los datos de testing. 
+predictions_SVMtest # Vemos las predicciones
+```
+
+Usamos de nuevo la matriz de confusión para evaluar la precisión del modelo:
+
+```{r}
+confusionMatrix(predictions_SVMtest, testData$Diagnosis)
+```
+
+Con el conjunto testing, el modelo obtuvo una accuracy del 96.46% con un IC del 95%. El Kappa fue de 0.92, lo que indica una excelente concordancia entre predicciones y datos reales. La matriz de confusión muestra que el modelo clasificó correctamente 71 casos benignos como tal, 38 malignos correctamente encasillados como malignos, pero hubo 4 malignos fueron mal clasificados como benignos (falsos negativos). La sensibilidad fue 100% (detectó todos los benignos) y la especificidad fue 90.5% (detectó la mayoría de los malignos correctamente). \# La clase B fue correctamente clasificada.
+
+Por último, obtenemos cuántos tipos hay de cada clase y vemos las probabilidades.
+
+```{r}
+table(testData$Diagnosis) 
+probabilidades_SVM <- predict(RF_Model, newdata = testData, type = "prob")
+
+probabilidades_SVM # Estas las usaremos más adelante para las curvas ROC
+```
+
+4.  MODELO KNN
+
+Elegimos el modelo KNN (paquete **caret**) porque es simple y no necesita entrenamiento. En contraposición es sensible a la escala de los datos y ruido. Además es lento con datos grandes.
+
+```{r}
+KNN_Model <- train(Diagnosis ~ ., data = trainData, method = "knn", trControl = trainControl(method = "cv", number = 10), preProcess = c("center", "scale"), tuneLength = 30)
+KNN_Model
+plot(KNN_Model)
+```
+
+\
+En el gráfico vemos la **Accuracy** calculada mediante cross-validation, así como los vecinos enfrentados. Al igual que indican las métricas del modelo posteriores, una accuracy del 97% es muy buen indicador.
+
+Hacemos las predicciones del modelo con los datos de training primero:
+
+```{r}
+predictions_KNN <- predict(KNN_Model, newdata = trainData)                   
+predictions_KNN   
+```
+
+De nuevo nos aseguramos de que los datos estén como factores para poder hacer la matriz.
+
+```{r}
+predictions_KNN <- factor(predictions_KNN, levels = c("B", "M"))
+trainData$Diagnosis <- factor(trainData$Diagnosis, levels = c("B", "M"))
+#Matriz de confusión para training:
+confusionMatrix(predictions_KNN, trainData$Diagnosis) 
+```
+
+La matriz de confusión identificó 283 casos benignos correctamente frentre a 8 errores. Por otro lado, clasificó 162 malignos correctamente frente a 3 fallos. Una accuracy del 97% con IC del 95% es un muy buen funcionamiento del modelo. El kappa es el más alto hasta el momento, siendo del 94%. De nuevo la clase benigna B ha sido correctamente clasificada como positiva.
+
+Probamos el modelo con los datos de testing:
+
+```{r}
+predictions_KNNtest <- predict(KNN_Model, newdata = testData)                   
+predictions_KNNtest    
+```
+
+De nuevo nos aseguramos de que los datos estén como factores para poder hacer la matriz.
+
+```{r}
+predictions_KNNtest <- factor(predictions_KNNtest, levels = c("B", "M"))
+testData$Diagnosis <- factor(testData$Diagnosis, levels = c("B", "M"))
+```
+
+Matriz de confusión para testing:
+
+```{r}
+confusionMatrix(predictions_KNNtest, testData$Diagnosis)
+```
+
+Al meter los datos de testing, vemos que el error es también bastante bajo, siendo de 3 errores frente a 71 aciertos para los casos benignos y de 39 malignos sin error. Accuracy y el IC de nuevo 97% y 95% respectivamente. El kappa vuelve a ser dle 94%, muy alto. Sensitividad de 1 es perfecta y especificidad del 92% prácticaemnte también. Clase B predicha correctamente.
+
+Por último, obtenemos cuántos tipos hay de cada clase y vemos las probabilidades.
+
+```{r}
+table(testData$Diagnosis) 
+probabilidades_KNN <- predict(KNN_Model, newdata = testData, type = "prob") 
+
+
+```
+
+```{r}
+probabilidades_KNN # Estas las usaremos más adelante para las curvas ROC
+probabilidades_KNN <- as.matrix(probabilidades_KNN)
+```
+
+# COMPARATIVA MODELOS: CURVAS ROC
+
+Estas curvas permiten hacer una comparativa entre los modelos. Ésta se llevará a cabo con las probabilidades que se han ido guardamndo durante toda la práctica.
+
+En primer lugar volvemos a asegurarnos de que Diagnosis se encuentra como factor:
+
+```{r}
+testData$Diagnosis <- factor(testData$Diagnosis, levels = c("B", "M"))
+```
+
+Creamos los objetos ROC para cada tipo de árbol:
+
+```{r}
+roc_RF <- roc(testData$Diagnosis, probabilidades_RF[, "B"], levels = c("B", "M"), direction = "<", plot = FALSE)
+roc_DT <- roc(testData$Diagnosis, probabilidades_DT[, "B"], levels = c("B", "M"), direction = "<", plot = FALSE)
+roc_SVM <- roc(testData$Diagnosis, probabilidades_SVM[, "B"], levels = c("B", "M"), direction = "<", plot = FALSE)
+roc_KNN <- roc(testData$Diagnosis, probabilidades_KNN[, "B"], levels = c("B", "M"), direction = "<", plot = FALSE)
+```
+
+Dibujamos todas las curvas ROC en un mismo gráfico:
+
+```{r}
+plot(roc_RF, col = "blue", lwd = 2, main = "Comparación de curvas ROC", legacy.axes = TRUE)
+plot(roc_DT, col = "green", lwd = 2, add = TRUE)
+plot(roc_SVM, col = "red", lwd = 2, add = TRUE)
+plot(roc_KNN, col = "orange", lwd = 2, add = TRUE)
+legend("bottomright",
+       legend = c(paste("Random Forest (AUC =", round(auc(roc_RF), 3), ")"),
+                  paste("Decision Tree (AUC =", round(auc(roc_DT), 3), ")"),
+                  paste("KNN (AUC =", round(auc(roc_KNN), 3), ")"),
+                  paste("SVM (AUC =", round(auc(roc_SVM), 3), ")")),
+       col = c("blue", "green", "red", "orange"), lwd = 2)
+```
+
+```{r}
+# Probabilidades guardadas durante la práctica:
+# Para Decision Tree:
+probabilidades_DT <- predict(DT_Model, newdata = testData, type = "prob")
+# Para SVM:
+probabilidades_SVM <- predict(SVM_Model, newdata = testData, type = "prob")
+# Para KNN:
+probabilidades_KNN <- predict(KNN_Model, newdata = testData, type = "prob")
+# Ya tienes las probabilidades de Random Forest en:
+probabilidades_RF <- predict(RF_Model, newdata = testData, type = "prob")
+```
+
+# Conclusiones
+
+No he conseguido desarrollar bien el apartado de las curvas ROC puesto que, por algunos problemas personales, no tuve el suficiente tiempo para indagar en el código y la información. Los gráfico sme daban errores contínuamente y me costó entender bien el código. He preferido cortar aquí el análisis antes que seguir avanzando sin entender del todo bien cuáles son mis pasos.
+
+Con las pruebas realizadas hasta ahora, podríamos decir que **KNN** y **SVM** tienen las mejores métricas, con accuracies cercanas al 97% y valores de kappa superiores a 0.9. Después **KNN** tiene sensibilidad perfecta (1 o 100%) y buena especificidad, además de un kappa más alto que SVM. **Random Forest** también es muy bueno y con buena exactitud y balance entre sensibilidad y especificidad. **Decision Tree** es el más débil de los cuatro, pero sigue siendo bueno (91% accuracy). KNN es ligeramente mejor al resto a nivel general, en cambio random forest hace buena correlación.
